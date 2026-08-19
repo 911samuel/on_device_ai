@@ -28,7 +28,7 @@ this repo; anything unverified is labelled as such on the slide itself.
                 Local inference              602,112 bytes in → 4,004 bytes out
                        │
                        ▼
-                   Prediction                "military uniform"  87.5%   3.9 ms
+                   Prediction                "military uniform"  87.5%   4.5 ms
 ```
 
 ### The pipeline, concretely
@@ -42,17 +42,18 @@ JPEG bytes → decode → 224×224 resize → normalise → [1,224,224,3] float3
 
 * Image classification, MobileNet, **entirely local** — no server exists in the codebase
 * Two LiteRT APIs behind **one** Dart interface: `CompiledModel` (LiteRT Next) and classic `Interpreter`
-* 69 host unit tests · 15 on-device integration tests validated against a Python reference interpreter
+* 69 host unit tests · 15 integration tests validated against a Python reference interpreter
 
-### Measured (iOS simulator, warm median, 30 runs)
+### Measured on a real iPhone 13 Pro (A15), warm median of 30 runs
 
 | Stage | Time | Note |
 |---|---:|---|
-| Preprocess | 19.5 ms | Dart-side decode + resize — **the bottleneck** |
-| Inference | **3.9 ms** | Interpreter + XNNPACK, float32 MobileNetV2 |
+| Preprocess | 15.1 ms | Dart-side decode + resize — **75–81% of total** |
+| Inference | **4.5 ms** | CompiledModel + Metal GPU, float32 MobileNetV2 |
 | Postprocess | 0.2 ms | dequantise, sort 1001, map labels |
 
-> Emulated targets only. No physical device, therefore **no NPU claim**.
+> Physical device. Also measured on the iOS simulator and Android emulator — and those disagreed with
+> real hardware, which is the subject of slide 2.
 
 ---
 
@@ -67,9 +68,9 @@ JPEG bytes → decode → 224×224 resize → normalise → [1,224,224,3] float3
 |---|---|
 | **Custom models** | Any `.tflite` graph. We ran two, one float32 and one uint8-quantized |
 | **Offline inference** | Release APK declares **no `INTERNET` permission**; full suite passes with the network unreachable |
-| **Low latency** | 3.9 ms inference, no round trip, no tail latency, no retry logic |
+| **Low latency** | 4.5 ms inference, no round trip, no tail latency, no retry logic |
 | **Privacy** | Pixels never leave the process. Nothing to breach, log, or subpoena |
-| **Hardware acceleration** | `CompiledModel` selects NPU→GPU→CPU and **reports what it actually kept** |
+| **Hardware acceleration** | Metal GPU **verified**: 4.53 ms vs 9.54 ms CPU-only = **2.11× faster**, same API and weights |
 | **No per-request cost** | Zero marginal cost per inference; zero backend to operate |
 
 ### What it costs
@@ -79,21 +80,34 @@ JPEG bytes → decode → 224×224 resize → normalise → [1,224,224,3] float3
 | **Model size** | 13.33 MB float32, 4.08 MB quantized |
 | **App binary** | arm64 APK **51.5 MB** vs 15.5 MB empty Flutter app → **+36 MB** (17.4 models + 14.6 runtime) |
 | **Memory** | Weights + arenas resident while loaded; we dispose before switching backends |
-| **Battery / thermal** | Sustained inference is sustained CPU/GPU load — **not verified**, needs a physical device |
-| **Device fragmentation** | Same code: GPU+CPU on iOS sim, **GPU compilation failed** on Android emulator → CPU fallback |
+| **Battery / thermal** | Sustained inference is sustained CPU/GPU load — **not measured** |
+| **Device fragmentation** | Same code, three targets: Metal verified on A15; **GPU compile failure** on Android emulator; **NPU numerically wrong** on the A15 |
+| **Accelerator correctness** | An accelerator can be *engaged and wrong*. Must be verified, not assumed |
 | **Model updates** | Bundled = app release. OTA needs signature + digest + tensor-contract versioning |
 | **Runtime compatibility** | `flutter_litert` is **community-maintained**, not a Google package |
 
 ### The result that keeps us honest
 
-> Same weights, same device: classic `Interpreter` + XNNPACK ran inference in **3.93 ms**;
-> LiteRT Next `CompiledModel` needed **11.41 ms**.
+> On the real A15, requesting the **Neural Engine** produced output that deviated **4.946% of range** from a
+> plain-CPU reference — reproducible bit-for-bit, against 0.0005% for healthy configurations. Consistent
+> with fp16 computation on the ANE.
 >
-> The newer, accelerator-first API was **2.9× slower here**. It buys automatic backend selection and a
-> path to the NPU — not present-day speed on this hardware. **Measure per target; don't assume.**
+> **The app refused the backend rather than serve wrong predictions.**
+>
+> The same configuration reported *healthy* on the iOS simulator (0.0002%), because Core ML there runs on
+> the host Mac and never touches a Neural Engine.
 
-And preprocessing (19.5 ms) cost 5× more than inference (3.9 ms). On-device ML performance work is
-often image-pipeline work, not model work.
+Two corollaries a senior audience should take away:
+
+1. **"Accelerated" and "correct" are independent properties.** Verify accelerator output against a CPU
+   reference at startup. We would have shipped silently wrong predictions without it.
+2. **Simulator benchmarks produce wrong conclusions.** An earlier draft of this deck claimed the classic
+   `Interpreter` API was 2.9× faster than `CompiledModel`, from simulator data. On real hardware the
+   ordering reverses — the simulator simply had no mobile GPU. We corrected the claim.
+
+And preprocessing (15.1 ms) costs ~3× inference (4.5 ms). On-device ML performance work is usually
+image-pipeline work, not model work. Note too that XNNPACK made the *quantized* model **76% slower** on
+this device — delegates are not automatically a win.
 
 ---
 
@@ -154,9 +168,10 @@ often image-pipeline work, not model work.
    the entire app layer with a fake model and zero native code.
 2. **Assert the tensor contract at startup.** Shape, dtype, quantization params, byte sizes. Wrong
    normalisation doesn't crash — it silently degrades accuracy.
-3. **Validate against a reference.** We compare on-device output to a Python LiteRT run on the same file.
-   This caught a real resampling defect that had quietly reordered predictions.
-4. **Report hardware, never assume it.** Requested ≠ effective. Verify against a CPU reference, and say
-   "not verified" when you cannot.
+3. **Validate against a reference — twice over.** Compare the pipeline against a host reference run (this
+   caught a resampling defect that had quietly reordered predictions), and compare each accelerator against
+   a plain-CPU reference at startup (this caught the ANE returning wrong output on a real phone).
+4. **Report hardware, never assume it.** Requested ≠ effective ≠ correct. Say "not verified" when you
+   cannot verify, and **test on physical devices** — the simulator called a broken backend healthy.
 5. **Keep inference off the UI thread**, and know when your binding won't let you.
 6. **Version the model as an API.** The tensor contract is part of it.

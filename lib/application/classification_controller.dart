@@ -10,7 +10,6 @@ import '../domain/model_spec.dart';
 import '../domain/on_device_model.dart';
 import '../domain/prediction.dart';
 import 'benchmark.dart';
-import 'network_self_test.dart';
 
 /// Builds an implementation for a descriptor. Injectable so widget tests and
 /// controller tests can run without any native runtime.
@@ -48,7 +47,6 @@ class ClassificationController extends ChangeNotifier {
     AssetBytesLoader? assetLoader,
     this.imagePicker,
     this.benchmarkRunner = const BenchmarkRunner(),
-    this.networkSelfTest = const NetworkSelfTest(),
   })  : _modelFactory = modelFactory ?? BackendRegistry.create,
         _loadAsset = assetLoader ?? loadBundledBytes;
 
@@ -75,7 +73,6 @@ class ClassificationController extends ChangeNotifier {
   /// Injected so the controller is testable without a platform channel.
   final ImagePickerFn? imagePicker;
   final BenchmarkRunner benchmarkRunner;
-  final NetworkSelfTest networkSelfTest;
 
   OnDeviceModel? _model;
   BackendDescriptor _backend = BackendRegistry.all.first;
@@ -84,7 +81,6 @@ class ClassificationController extends ChangeNotifier {
   Uint8List? _imageBytesForDisplay;
   PredictionResult? _result;
   BenchmarkReport? _benchmark;
-  NetworkProbeResult? _networkProbe;
   String? _errorMessage;
   String? _errorDetail;
   bool _disposed = false;
@@ -97,7 +93,6 @@ class ClassificationController extends ChangeNotifier {
   Uint8List? get imageBytes => _imageBytesForDisplay;
   PredictionResult? get result => _result;
   BenchmarkReport? get benchmark => _benchmark;
-  NetworkProbeResult? get networkProbe => _networkProbe;
   String? get errorMessage => _errorMessage;
   String? get errorDetail => _errorDetail;
 
@@ -224,12 +219,6 @@ class ClassificationController extends ChangeNotifier {
     } on Object catch (error) {
       _fail('The benchmark could not complete.', error.toString());
     }
-  }
-
-  /// Asks the OS for an outbound socket; see [NetworkSelfTest].
-  Future<void> runNetworkSelfTest() async {
-    _networkProbe = await networkSelfTest.probe();
-    _notify();
   }
 
   @override

@@ -18,20 +18,26 @@ technical review — not to look impressive.
 | **Flutter integration** | Dart ↔ native over `dart:ffi` via `flutter_litert`; the UI never touches a runtime object |
 | **Inference** | The full pipeline is explicit and measured stage by stage: decode → resize → normalise → tensor → invoke → dequantise → sort → label |
 | **Offline execution** | Proven, not asserted — the release APK declares no `INTERNET` permission, and the whole suite passes with the network unreachable. See [`docs/OFFLINE_VERIFICATION.md`](docs/OFFLINE_VERIFICATION.md) |
-| **Honest hardware reporting** | The UI shows accelerators *requested* vs *actually kept*, and whether that was verified against a CPU reference. NPU/GPU use is reported as **Not verified** on emulated targets, because it cannot be verified there |
+| **Honest hardware reporting** | The UI shows accelerators *requested* vs *actually kept*. Behind it, every compiled model is checked against a plain-CPU reference at startup — which on a real iPhone **caught the Neural Engine returning numerically wrong output** and refused the backend |
 
 ## Status
 
 ```text
+Build (physical iPhone)   PASS   iPhone 13 Pro (A15), iOS 26.6 - signed, installed, run
 Build (iOS simulator)     PASS
 Build (Android release)   PASS
-Inference                 PASS   6 backend configs x 3 images, matched against a Python reference
+Inference                 PASS   matched against a Python reference on all three targets
 Offline test              PASS   no INTERNET permission in release; suite passes with network unreachable
+iOS (device + simulator)  PASS
 Android                   PASS   Pixel 8 emulator, arm64-v8a
-iOS                       PASS   iPhone 17 simulator, iOS 26.2
-Tests                     PASS   69 unit tests + 15 on-device integration tests
-GPU acceleration          NOT VERIFIED   emulator has no OpenCL; simulator GPU is the host Mac's
-NPU / Neural Engine       NOT VERIFIED   no physical device in scope
+Tests                     PASS   69 unit + 15 integration (13 pass / 2 skipped on device)
+
+GPU acceleration (iOS)    VERIFIED       Metal on A15: 4.53 ms vs 9.54 ms CPU-only = 2.11x speed-up
+NPU / Neural Engine       ENGAGED, REJECTED   Core ML on A15 deviates 4.946% from the CPU reference
+                                         (reproducible bit-for-bit) - the app refuses the backend
+GPU / NPU (Android)       NOT VERIFIED   emulator has no OpenCL, no vendor NPU runtime;
+                                         no physical Android device available
+Battery / thermal         NOT MEASURED
 ```
 
 ## Architecture
@@ -112,31 +118,33 @@ weights. Full discussion, with the caveats for each alternative, is in
 
 ## Performance
 
-Measured on emulated targets only; see [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the full tables and
-for why these are *relative* comparisons, not latency budgets. 30 runs per backend, cold reported
-separately from warm.
-
-iOS Simulator (iPhone 17, iOS 26.2), warm medians:
+**iPhone 13 Pro (A15 Bionic), iOS 26.6** — warm medians over 30 runs. Full tables, including the emulated
+targets, in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 | Backend | Inference | Total |
 |---|---:|---:|
-| Interpreter · float32 · XNNPACK | **3.93 ms** | 23.9 ms |
-| Interpreter · uint8 · XNNPACK | 4.67 ms | 24.4 ms |
-| Interpreter · uint8 · no delegate | 4.95 ms | 24.9 ms |
-| CompiledModel · float32 · CPU | 11.41 ms | 30.9 ms |
-| CompiledModel · float32 · GPU→CPU | 11.47 ms | 31.3 ms |
-| CompiledModel · float32 · NPU→CPU | 16.80 ms | 36.6 ms |
+| Interpreter · uint8 · no delegate | **3.51 ms** | 18.8 ms |
+| CompiledModel · float32 · GPU→CPU | 4.53 ms | 20.3 ms |
+| Interpreter · float32 · XNNPACK | 4.79 ms | 20.1 ms |
+| Interpreter · uint8 · XNNPACK | 6.17 ms | 21.2 ms |
+| CompiledModel · float32 · CPU only | 9.54 ms | 24.9 ms |
+| CompiledModel · float32 · NPU→CPU | **refused — wrong output** | — |
 
-Three findings worth stating plainly:
+Four findings worth stating plainly:
 
-1. **Preprocessing dominates.** ~19.5 ms of Dart-side decode+resize against 3.9 ms of inference. If this
-   needed 30 fps, the model is not the bottleneck — the JPEG is.
-2. **The newer API was not the faster one here.** `Interpreter`+XNNPACK beat `CompiledModel` by ~2.9× on the
-   same weights. Part of that is the helper-isolate hop `runAsync` pays; the rest is real. Choosing
-   `CompiledModel` buys future NPU access and automatic selection, not present-day speed on this hardware.
-3. **The first model of the process is expensive.** First `CompiledModel` creation took 1782 ms; the second
-   took 125 ms, because the LiteRT environment (GPU stack, kernel cache) is created once per isolate. Warm
-   up off the critical path.
+1. **The Neural Engine returned numerically wrong output, and the app refused it.** Core ML compiled fine,
+   then deviated **4.946% of output range** from a plain-CPU reference — reproducible bit-for-bit across
+   runs, against 0.0005% for healthy configurations. Consistent with fp16 computation on the ANE. Without
+   the startup verification this would have shipped silently wrong predictions.
+2. **GPU (Metal) is verified and real:** 4.53 ms vs 9.54 ms CPU-only on the same API and weights — a
+   **2.11× speed-up**.
+3. **Simulator benchmarks led to a wrong conclusion.** On the simulator `Interpreter`+XNNPACK appeared
+   ~2.9× faster than `CompiledModel`; on real hardware the ordering reverses, because the simulator has no
+   mobile GPU. Do not draw architectural conclusions from emulated measurement.
+4. **Preprocessing dominates:** ~15 ms of Dart decode+resize against 3.5–9.5 ms of inference — 75–81% of
+   total latency. Inference sped up ~4× moving to real hardware; preprocessing barely moved, because it is
+   single-threaded Dart. Also note XNNPACK made the *quantized* model 76% slower on this device (6.17 vs
+   3.51 ms): delegates are not automatically a win.
 
 ## Limitations
 
@@ -145,10 +153,11 @@ Three findings worth stating plainly:
   App Bundle — the universal APK is 112.5 MB.
 * **Platform support.** Android and iOS are built and tested here. `flutter_litert` also claims macOS,
   Windows, Linux and web; **not verified** in this project.
-* **Hardware variance.** Accelerator availability is per-device, not per-platform. The same code got
-  GPU+CPU on the iOS simulator and a hard GPU compilation failure on the Android emulator
-  (`LiteRtCreateManagedTensorBufferFromRequirements … kLiteRtStatusErrorRuntimeFailure`), correctly falling
-  back to CPU. Any performance promise must be validated per target device tier.
+* **Hardware variance is the headline risk.** The same code, three targets: verified Metal acceleration on
+  an A15; a hard GPU compilation failure on the Android emulator
+  (`LiteRtCreateManagedTensorBufferFromRequirements … kLiteRtStatusErrorRuntimeFailure`) falling back to CPU;
+  and a Core ML/ANE path that is *numerically wrong on the real device but reported healthy on the
+  simulator*. Every performance and correctness claim must be validated per device tier, on physical hardware.
 * **`isFullyAccelerated` is not a fallback detector.** The binding documents `false` as ambiguous. This app
   displays it but never uses it to assert acceleration; it uses an output-deviation comparison against a
   plain-CPU reference instead — and even that proves only that *a different compute path* ran, not which
@@ -159,6 +168,9 @@ Three findings worth stating plainly:
 * **Delegate + background isolate is mutually exclusive** in this binding on the `Interpreter` path, so the
   XNNPACK configurations block the calling isolate for 4–9 ms. Production code would own a worker isolate
   and construct the interpreter inside it.
+* **The NPU is unusable for this model as-is.** Not a runtime bug we can work around from Dart: the graph
+  would need to be validated (or retrained quantization-aware) for reduced precision. Untested whether an
+  fp16-tolerant model passes.
 * **Model updates.** Both models are bundled, so updating one means shipping an app release. A production
   system would fetch models at runtime into app storage, verify a signature and digest before use, keep the
   bundled model as a fallback, and pin `ModelSpec` per model version — the tensor contract is part of the
@@ -239,14 +251,21 @@ iOS release/physical-device path.
   first-party Flutter binding — `litert_flutter` from publisher `tensorflow.org` is an abandoned `0.0.1`
   stub. This is a shared risk across the ecosystem: ML Kit's Flutter plugins also state they are not
   maintained by Google, and the main ONNX Runtime plugin is unmaintained with competing forks.
-* All performance numbers come from an **emulator and a simulator**. No physical device was used.
-* No NPU or GPU acceleration claim is made. Where the runtime reported `effective = NPU + CPU` on the iOS
-  simulator, that means Core ML accepted the graph — on a simulator Core ML runs on the host Mac, and there
-  is no Neural Engine, so **ANE usage is not verified**.
+* Primary numbers come from a **physical iPhone 13 Pro**; emulator/simulator tables are retained only to
+  show how misleading emulated measurement was. No physical **Android** device was available, so Android
+  GPU and vendor-NPU acceleration remain unverified.
+* iOS **GPU (Metal) acceleration is verified** by a like-for-like 2.11× measurement. The **Neural Engine
+  was engaged but rejected** for numerically wrong output; we therefore have **no ANE latency figure**, and
+  quoting one would mean quoting a wrong-output configuration.
+* An earlier revision of these docs concluded from simulator data that the classic `Interpreter` API was
+  ~2.9× faster than `CompiledModel`. Real hardware reversed that. The claim was corrected, not quietly
+  dropped.
 * One check was attempted and abandoned rather than fudged: UI-driven inference in an Android **release**
   build, because the emulator's System UI kept ANR-ing and swallowing taps. An earlier socket audit that
   compared against an empty uid string produced four convenient zeros; it was discarded and redone with a
   positive control.
+* The on-screen UI deliberately shows values only — model, tensor shapes, accelerators, latency. The
+  reasoning, caveats and verification prose live in `docs/` and the slides, not on the device.
 
 ## Repository layout
 

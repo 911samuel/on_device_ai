@@ -153,12 +153,13 @@ Two mechanisms are used, and the UI reports which one is live:
 | `CompiledModel` | `runAsync()` — the binding dispatches the blocking native call on a per-model helper isolate | UI thread free. Costs one isolate round trip per inference |
 | `CompiledModel` with a live GPU backend on Android | `run()` on the calling isolate | Deliberate: the binding documents `runAsync` as unvalidated against thread-affine Android GL/CL drivers, so correctness wins over smoothness |
 | `Interpreter`, no delegate | `IsolateInterpreter` — shares the native interpreter by address with a worker isolate | UI thread free |
-| `Interpreter` with a delegate attached | `invoke()` on the calling isolate | A delegated native interpreter cannot be safely shared across isolates in this binding, so it blocks. Measured 3.9–8.5 ms — one or two dropped frames |
+| `Interpreter` with a delegate attached | `invoke()` on the calling isolate | A delegated native interpreter cannot be safely shared across isolates in this binding, so it blocks. Measured 4.8–6.2 ms on an A15 — roughly one dropped frame at 60 Hz |
 
-The last row is a real limitation, reported in the UI's *Execution* row rather than hidden. Production code
-that needed both a delegate and a free UI thread would own a long-lived worker isolate and create the
-interpreter *inside* it (the package ships `IsolateWorkerBase` for exactly this), so the native handle never
-crosses an isolate boundary.
+The last row is a real limitation. Production code that needed both a delegate and a free UI thread would own
+a long-lived worker isolate and create the interpreter *inside* it (the package ships `IsolateWorkerBase` for
+exactly this), so the native handle never crosses an isolate boundary. Worth noting from the device
+measurements: on the A15 the *fastest* configuration (quantized, no delegate, 3.51 ms) is also the one that
+can use `IsolateInterpreter`, so here there was no trade-off to make.
 
 ## Failure handling
 

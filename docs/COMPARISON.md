@@ -90,7 +90,9 @@ cheap local model gates or pre-filters, cloud handles the hard tail.
 | `CompiledModel` selects and reports accelerators | **Verified** — including a narrowing GPU→CPU failure on the Android emulator, correctly reported |
 | `CompiledModel` is float32-only, so quantized models need the classic `Interpreter` | **Verified** — enforced in code, covered by a test |
 | Quantized model is 3.3× smaller (4.08 vs 13.33 MB) | **Verified** |
-| Newer API is faster | **Refuted on this hardware** — `Interpreter` + XNNPACK was ~2.9× faster than `CompiledModel` for the same weights |
-| Apple Neural Engine is used | **Not verified** — the iOS simulator has no ANE; requires a physical device |
-| Android GPU / vendor NPU acceleration | **Not verified** — GPU compilation fails on the emulator (no OpenCL); no vendor NPU runtime present |
-| Battery and thermal behaviour | **Not verified** — needs sustained runs on physical hardware |
+| iOS GPU (Metal) acceleration | **Verified on an iPhone 13 Pro** — 4.53 ms vs 9.54 ms CPU-only on the same API and weights, a 2.11× speed-up |
+| Apple Neural Engine is usable for this model | **Refuted** — Core ML engaged but deviated 4.946% of output range from a plain-CPU reference, reproducible bit-for-bit. The app refuses the backend. No ANE latency figure exists as a result |
+| Newer API is faster | **Depends on the device, and the simulator misled us.** Simulator: `Interpreter`+XNNPACK ~2.9× faster. Real A15: `CompiledModel`+GPU (4.53 ms) narrowly beats `Interpreter`+XNNPACK (4.79 ms) |
+| Delegates always help | **Refuted** — XNNPACK made the quantized model 76% slower on the A15 (6.17 vs 3.51 ms) |
+| Android GPU / vendor NPU acceleration | **Not verified** — GPU compilation fails on the emulator (no OpenCL); no vendor NPU runtime; no physical Android device available |
+| Battery and thermal behaviour | **Not measured** — needs sustained runs with power instrumentation |

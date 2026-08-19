@@ -29,8 +29,9 @@ Rough timing: 4 min slide 1, 6 min slide 2, 4 min slide 3, rest Q&A.
 > to minus-one-to-one — and returns 4,004 bytes, which is 1001 float32 probabilities. Everything between
 > 'user picked a photo' and 'model can run' is my responsibility, and that is the part that bites you.
 >
-> And that shows up in the timings. Inference is 3.9 milliseconds. Preprocessing is 19.5. Five times the
-> model. If someone asked me to make this pipeline faster, I would not touch the model."
+> And that shows up in the timings, measured on a real iPhone 13 Pro. Inference is 4.5 milliseconds.
+> Preprocessing is 15. Three times the model, and about 75% of the total. If someone asked me to make this
+> pipeline faster, I would not touch the model.""
 
 ### What the diagram means
 
@@ -64,9 +65,10 @@ fine-tuned. The point of the PoC is the integration, so I deliberately used a kn
 expected outputs I can verify.
 
 **"How do you know the predictions are actually right?"**
-I run the same model files through the Python LiteRT reference interpreter and compare. On the decisive
-sample the on-device answer is "military uniform" at 0.875 against the reference's 0.804. That comparison is
-a test, not a one-off.
+Two independent comparisons. The pipeline is compared against the Python LiteRT reference interpreter on the
+same model files — on the decisive sample, "military uniform" at 0.875 on device against 0.804 in the
+reference. And separately, every compiled model is compared against a plain-CPU reference at startup, which
+is what caught the Neural Engine returning wrong output. Both are tests, not one-offs.
 
 ---
 
@@ -90,18 +92,26 @@ a test, not a one-off.
 >
 > Now the right column, because I am not here to sell this. Thirty-six megabytes added to the app: seventeen
 > of models, fifteen of runtime, per ABI. Battery and thermals I did not measure, so I am not going to tell
-> you about them. Fragmentation is the one that will actually hurt you: the exact same code got GPU plus CPU
-> on the iOS simulator and a hard GPU compilation failure on the Android emulator, which fell back to CPU.
+> you about them.
 >
-> And then the result at the bottom, which is my favourite thing in this PoC. Same weights, same device: the
-> old `Interpreter` API with XNNPACK did inference in 3.9 milliseconds. The new accelerator-first
-> `CompiledModel` API took 11.4. Almost three times slower. Part of that is an isolate hop I chose to pay to
-> keep the UI thread free — I can bound that at a couple of milliseconds because another configuration uses
-> the same hop. The rest is real.
+> And then the result at the bottom, which is the most valuable thing in this PoC.
 >
-> The lesson is not 'CompiledModel is bad'. It is that the newer API buys you automatic backend selection
-> and a path to the NPU, not speed today on this hardware. If you take one thing from this slide: measure on
-> your target tier, don't infer from the API's marketing."
+> On the real A15 I asked for the Neural Engine. It compiled successfully. And then its output deviated
+> almost five percent of the output range from a plain-CPU reference — reproducible bit-for-bit across runs,
+> where a healthy configuration deviates five ten-thousandths of a percent. That is consistent with the ANE
+> computing in fp16. So the app refused the backend and told me why.
+>
+> Here is the part that should worry you. The same configuration reported perfectly healthy on the iOS
+> simulator, because Core ML on a simulator runs on this Mac and never touches a Neural Engine. If I had
+> tested only on the simulator, I would have shipped a configuration that is numerically wrong on real
+> phones — and it would not have crashed, it would just have been quietly worse.
+>
+> Two things follow. First: 'accelerated' and 'correct' are independent properties, so verify accelerator
+> output against a CPU reference at startup. Second, and I'll own this one: an earlier version of this deck
+> claimed the old `Interpreter` API was almost three times faster than `CompiledModel`. That came from
+> simulator numbers. On real hardware the ordering reverses, because the simulator has no mobile GPU. I
+> corrected the claim rather than dropping it, because the methodological lesson is the point: do not draw
+> architectural conclusions from emulated measurement."
 
 ### What the tables mean
 
@@ -124,14 +134,21 @@ a test, not a one-off.
 ### Likely questions
 
 **"Is it actually using the NPU?"**
-Not verified, and I will not claim it. The iOS simulator has no Neural Engine — Core ML there runs on the
-host Mac. On the Android emulator there is no vendor NPU runtime, so the request was narrowed to CPU and my
-UI says so. Proving ANE use needs a physical device.
+On the real A15, Core ML was demonstrably engaged — the output changed by ~5% of range, which the CPU path
+cannot explain. But it was *wrong*, so we refused it. I have no ANE latency figure, and I am not going to
+quote one from a configuration that computes the wrong answer. On Android there is no vendor NPU runtime, so
+the request was narrowed to CPU.
 
-**"Then why does your UI say 'effective: NPU + CPU' on the simulator?"**
-Because that is what the runtime reported: Core ML accepted the graph. That is not the same as the ANE
-executing it. This is exactly why the verdict line reads "distinct compute path verified, silicon not
-identified" rather than "NPU verified".
+**"Couldn't that 5% just be fp16 rounding, which might be fine?"**
+It might be acceptable for some models — that is a per-model decision, and I have not tested an
+fp16-tolerant or quantization-aware-trained model here. But 4.9% of output range on a probability
+distribution is not something I would ship untested, and the tolerance that flagged it (1%) is the
+binding's own, calibrated against measurements where healthy configurations sat under 0.07%.
+
+**"What would you do to actually use the ANE?"**
+Validate the specific model at fp16 offline, compare top-1 agreement and confidence drift on a real
+evaluation set, and only then enable it — per device family, behind a remote flag, with the CPU-reference
+check still running at startup.
 
 **"How can you tell acceleration from a silent CPU fallback?"**
 Compare output against a plain-CPU reference. If it is bit-identical, nothing else touched the graph. If it

@@ -1,7 +1,7 @@
 # Q&A preparation
 
-Twenty questions senior engineers are likely to ask, with answers that are technically accurate and, where
-something was not measured, say so.
+Twenty-one questions senior engineers are likely to ask, with answers that are technically accurate and,
+where something was not measured, say so. Figures are from a physical iPhone 13 Pro (A15) unless stated.
 
 ---
 
@@ -28,14 +28,21 @@ Not a reason: "ONNX is more standard." On mobile specifically that is not the de
 
 ### 3. Is LiteRT actually using the NPU?
 
-**Not verified in this PoC, and I will not claim it.** The iOS simulator has no Neural Engine — Core ML there
-executes on the host Mac. The Android emulator has no vendor NPU runtime, so our NPU request was narrowed to
-CPU and the UI reported that.
+On a real iPhone 13 Pro: **yes, Core ML was engaged — and it computed the wrong answer, so we refused it.**
 
-What I *can* show: when we requested `{npu, cpu}` on the simulator, the runtime reported `effective = NPU +
-CPU` (Core ML accepted the graph) and the output deviated 0.0002% from a plain-CPU reference — so *a
-different compute path* ran. That does not identify which silicon. Proving ANE execution needs a physical
-device, and ideally an Xcode Instruments Core ML/ANE trace.
+Requesting `{npu, cpu}` compiled successfully, then failed the startup correctness check with a deviation of
+**4.946% of output range** against a plain-CPU reference, reproducible bit-for-bit across independent runs.
+Healthy configurations on the same device deviate 0.0005%. That the output moved so far is itself evidence
+Core ML genuinely ran the graph; it is also evidence the result is unusable. The most likely cause is fp16
+precision — the binding documents that the Apple Neural Engine and Qualcomm HTP compute in reduced precision.
+
+Consequences I state carefully: we have **no ANE latency figure**, because quoting one would mean quoting a
+configuration that computes the wrong answer. And note the trap — the **iOS simulator reported this same
+configuration as healthy** (0.0002%), because Core ML there runs on the host Mac and never touches a Neural
+Engine. Simulator-only testing would have shipped this.
+
+On Android, no vendor NPU runtime is installed, so the request is silently narrowed to CPU and the UI shows
+`effective = CPU`.
 
 ### 4. How do we know inference is happening locally?
 
@@ -51,6 +58,17 @@ Four independent pieces of evidence, in descending strength:
    `rootBundle`. There is no HTTP client in the dependency graph.
 
 Details, including which checks are weak and one I could not complete, are in `docs/OFFLINE_VERIFICATION.md`.
+
+### 4b. GPU acceleration — did that work?
+
+Yes, and it is the one acceleration claim this PoC can make cleanly. On the A15, `{gpu, cpu}` reported
+`effective = GPU + CPU`, deviated 0.0005% from the CPU reference (non-zero, so a different compute path ran;
+well inside tolerance, so it is correct), and measured **4.53 ms against 9.54 ms** for the same API and
+weights CPU-only — a **2.11× speed-up**. Same measurement path on both sides, including the isolate hop, so
+it is like-for-like.
+
+Android GPU is **not verified**: the emulator has no working OpenCL and compilation fails outright with
+`kLiteRtStatusErrorRuntimeFailure`, correctly falling back to CPU.
 
 ### 5. What happens if the device doesn't have an NPU?
 
@@ -69,17 +87,18 @@ difference, because a PoC that printed the request would be claiming acceleratio
 **Not measured** — that needs sustained runs on physical hardware with power instrumentation, which was out
 of scope.
 
-What I can say from first principles and from the numbers I do have: a single inference is 4–17 ms of
-compute, which is negligible. The concern is *sustained* inference — a live camera pipeline at 30 fps means
-continuous CPU or GPU load, which raises SoC temperature, triggers thermal throttling, and increases drain.
-NPUs exist largely because they do this work at far better joules-per-inference than a CPU. Also relevant:
-in this pipeline the JPEG decode and resize cost 5× the inference, so a naive camera loop would burn most of
-its power on image handling, not on the model.
+What I can say from first principles and from the numbers I do have: a single inference is 3.5–9.5 ms of
+compute on an A15, which is negligible. The concern is *sustained* inference — a live camera pipeline at
+30 fps means continuous CPU or GPU load, which raises SoC temperature, triggers thermal throttling, and
+increases drain. NPUs exist largely because they do this work at far better joules-per-inference than a CPU,
+which is a reason to care that our ANE path failed correctness. Also relevant: in this pipeline the JPEG
+decode and resize cost ~3× the inference, so a naive camera loop would burn most of its power on image
+handling, not on the model.
 
 ### 7. How big can the model realistically be?
 
-Constraints are memory and app size rather than a hard limit. Our 13.3 MB float32 model loads in ~125 ms
-(warm) and works comfortably. Practical guidance:
+Constraints are memory and app size rather than a hard limit. Our 13.3 MB float32 model loads in ~91 ms on
+an A15 (second load in-process; the first pays ~688 ms for the shared LiteRT/GPU environment). Practical guidance:
 
 * Weights are resident in RAM while loaded, plus a tensor arena. Two float32 models at once is ~28 MB, which
   is why we dispose before switching.
@@ -210,15 +229,18 @@ changes above it.
 
 ### 17. Which API should we actually use — CompiledModel or Interpreter?
 
-Decide per model and per target, and measure. As of this PoC:
+Decide per model and per target, and measure on **physical hardware**. As of this PoC:
 
-* **`CompiledModel`** if your model is float32 and you want the runtime to handle NPU→GPU→CPU selection, plus
-  the ability to report what it selected. It is the current recommended API and where new capability lands.
-* **`Interpreter`** if you need quantized/integer I/O, named signatures, custom ops, or on-device training —
-  or if measurement says it is faster, which on our hardware it was by ~2.9×.
+* **`CompiledModel`** if your model is float32 and you want the runtime to handle GPU/NPU selection and
+  report what it kept. On the real A15 with Metal available it was the fastest correct float path (4.53 ms).
+* **`Interpreter`** if you need quantized/integer I/O, named signatures, custom ops or on-device training.
+  On the A15 the quantized model with **no delegate** gave the fastest inference measured anywhere in this
+  project (3.51 ms) — and it is also the only `Interpreter` configuration that can use `IsolateInterpreter`.
 
-The uncomfortable result is worth repeating: the newer API was slower here. Some of that is our `runAsync`
-isolate hop and its fp32 default, but not all. Do not choose on API novelty.
+A cautionary tale attached to this question: on the iOS **simulator**, `Interpreter`+XNNPACK looked ~2.9×
+faster than `CompiledModel`, and an earlier version of this material concluded from that. On real hardware
+the ordering reverses, because the simulator has no mobile GPU. The methodological answer is more valuable
+than the API answer: **benchmark on the device tiers you ship to.**
 
 ### 18. Why is preprocessing slower than inference, and what would you do about it?
 
@@ -252,7 +274,8 @@ the failure mode is silent degradation, not a crash.
 
 ### 20. What would you do differently for production?
 
-1. Validate on **physical devices** across tiers, and settle the GPU/NPU question with real measurements.
+1. Validate on **physical devices** across tiers — this PoC already shows why: a backend the simulator called
+   healthy is numerically broken on a real A15. Extend to an Android phone, which remains unmeasured.
 2. Ship **one** model, chosen by measurement, and split per ABI or use an App Bundle.
 3. Move preprocessing to native/GPU and feed camera frames rather than JPEGs.
 4. Own a worker isolate for inference so a delegate never forces work onto the UI thread.

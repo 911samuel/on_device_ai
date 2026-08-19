@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import '../application/classification_controller.dart';
 import '../domain/backend_descriptor.dart';
 import 'widgets/benchmark_card.dart';
-import 'widgets/offline_card.dart';
 import 'widgets/prediction_card.dart';
 import 'widgets/runtime_card.dart';
 import 'widgets/section_card.dart';
@@ -11,9 +10,11 @@ import 'widgets/timings_card.dart';
 
 /// The single screen of the PoC.
 ///
+/// Deliberately shows values, not explanations: image, prediction, latency,
+/// model and runtime facts. The reasoning lives in `docs/`.
+///
 /// It talks only to [ClassificationController] and to domain types; there is no
-/// import of `flutter_litert` anywhere in `lib/ui/`, which is the point of the
-/// architecture rather than a side effect of it.
+/// import of `flutter_litert` anywhere in `lib/ui/`.
 class ClassificationPage extends StatelessWidget {
   const ClassificationPage({required this.controller, super.key});
 
@@ -42,14 +43,11 @@ class ClassificationPage extends StatelessWidget {
           body: ListView(
             padding: const EdgeInsets.only(bottom: 28),
             children: [
-              _BackendSelector(controller: controller),
               _ImageSection(controller: controller),
+              _BackendSelector(controller: controller),
               _Actions(controller: controller),
               if (error != null)
-                _ErrorCard(
-                  message: error,
-                  detail: controller.errorDetail,
-                ),
+                _ErrorCard(message: error, detail: controller.errorDetail),
               if (result != null) PredictionCard(result: result),
               if (result != null)
                 TimingsCard(
@@ -59,12 +57,6 @@ class ClassificationPage extends StatelessWidget {
               if (benchmark != null) BenchmarkCard(report: benchmark),
               if (report != null)
                 RuntimeCard(report: report, spec: controller.spec),
-              OfflineCard(
-                spec: controller.spec,
-                probe: controller.networkProbe,
-                onProbe: controller.runNetworkSelfTest,
-                busy: controller.isBusy,
-              ),
             ],
           ),
         );
@@ -80,40 +72,28 @@ class _BackendSelector extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SectionCard(
-      title: 'Inference backend',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          DropdownButtonFormField<BackendDescriptor>(
-            initialValue: controller.backend,
-            isExpanded: true,
-            decoration: const InputDecoration(
-              border: OutlineInputBorder(),
-              contentPadding:
-                  EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: DropdownButtonFormField<BackendDescriptor>(
+        initialValue: controller.backend,
+        isExpanded: true,
+        decoration: const InputDecoration(
+          labelText: 'Backend',
+          border: OutlineInputBorder(),
+          contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        ),
+        items: [
+          for (final b in controller.backends)
+            DropdownMenuItem(
+              value: b,
+              child: Text(b.label, overflow: TextOverflow.ellipsis),
             ),
-            items: [
-              for (final b in controller.backends)
-                DropdownMenuItem(
-                  value: b,
-                  child: Text(b.label, overflow: TextOverflow.ellipsis),
-                ),
-            ],
-            onChanged: controller.isBusy
-                ? null
-                : (value) {
-                    if (value != null) controller.selectBackend(value);
-                  },
-          ),
-          const SizedBox(height: 8),
-          Text(
-            controller.backend.rationale,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-          ),
         ],
+        onChanged: controller.isBusy
+            ? null
+            : (value) {
+                if (value != null) controller.selectBackend(value);
+              },
       ),
     );
   }
@@ -128,7 +108,7 @@ class _ImageSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final bytes = controller.imageBytes;
     return SectionCard(
-      title: 'Input image',
+      title: 'Input',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -167,17 +147,6 @@ class _ImageSection extends StatelessWidget {
               ),
             ],
           ),
-          if (controller.image != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(
-                '${controller.image!.source} · '
-                '${controller.image!.byteLength} bytes encoded',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      fontFamily: 'monospace',
-                    ),
-              ),
-            ),
         ],
       ),
     );
@@ -238,7 +207,7 @@ class _ErrorCard extends StatelessWidget {
                 ?.copyWith(color: theme.colorScheme.onErrorContainer),
           ),
           if (detail != null) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             Text(
               detail!,
               style: theme.textTheme.bodySmall?.copyWith(

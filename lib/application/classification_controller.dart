@@ -9,6 +9,7 @@ import '../domain/ml_exceptions.dart';
 import '../domain/model_spec.dart';
 import '../domain/on_device_model.dart';
 import '../domain/prediction.dart';
+import '../domain/resize_strategy.dart';
 import 'benchmark.dart';
 
 /// Builds an implementation for a descriptor. Injectable so widget tests and
@@ -182,6 +183,23 @@ class ClassificationController extends ChangeNotifier {
   }
 
   /// Runs one prediction.
+  /// How a non-square photo is fitted to the model's square input.
+  ///
+  /// Exposed as user state rather than a constant because the two options trade
+  /// off differently per photo — see [ResizeStrategy] for the measurements. The
+  /// previous result is cleared when this changes, so a stale prediction is
+  /// never shown next to a different setting.
+  ResizeStrategy get resizeStrategy => _resizeStrategy;
+  ResizeStrategy _resizeStrategy = ResizeStrategy.stretch;
+
+  void setResizeStrategy(ResizeStrategy strategy) {
+    if (isBusy || strategy == _resizeStrategy) return;
+    _resizeStrategy = strategy;
+    _result = null;
+    _benchmark = null;
+    notifyListeners();
+  }
+
   Future<void> classify() async {
     final model = _model;
     final image = _image;
@@ -189,7 +207,7 @@ class ClassificationController extends ChangeNotifier {
     _clearError();
     _setStatus(ControllerStatus.running);
     try {
-      _result = await model.predict(image);
+      _result = await model.predict(image, resize: _resizeStrategy);
       _setStatus(ControllerStatus.ready);
     } on OnDeviceMlException catch (error) {
       _fail(error.userMessage, error.toString());
@@ -212,7 +230,7 @@ class ClassificationController extends ChangeNotifier {
         backendLabel: _backend.label,
         iterations: iterations,
       );
-      _result = await model.predict(image);
+      _result = await model.predict(image, resize: _resizeStrategy);
       _setStatus(ControllerStatus.ready);
     } on OnDeviceMlException catch (error) {
       _fail(error.userMessage, error.toString());

@@ -184,4 +184,80 @@ class PredictionResult {
   final String imageSource;
 
   Prediction get top => predictions.first;
+
+  /// Confidence at or above which the top-1 label is treated as a real answer.
+  ///
+  /// 0.50 is not invented here: it is the same threshold
+  /// `integration_test/on_device_inference_test.dart` uses to decide whether the
+  /// reference prediction is decisive enough to assert an exact label match.
+  /// Reusing it keeps the UI and the test suite telling the same story.
+  static const double decisiveConfidence = 0.50;
+
+  /// Below this gap between top-1 and top-2, the model is effectively spreading
+  /// its probability rather than choosing.
+  static const double indecisiveMargin = 0.10;
+
+  /// True when the top-1 confidence clears [decisiveConfidence].
+  bool get isDecisive => top.confidence >= decisiveConfidence;
+
+  /// How far ahead the winner is. Small values mean a near-tie.
+  double get topTwoMargin => predictions.length < 2
+      ? top.confidence
+      : top.confidence - predictions[1].confidence;
+
+  /// True when the result looks like "the right answer is not on the menu".
+  ///
+  /// These models choose among a fixed 1,001 ImageNet classes and have no way to
+  /// abstain, so an out-of-vocabulary subject — a person, a building, a phone, a
+  /// plate of food, none of which are ImageNet classes — still produces a
+  /// confident-looking label. The tell is a low top-1 *and* a crowded field: the
+  /// probability is spread across several nearest-neighbours rather than
+  /// concentrated on one.
+  ///
+  /// This is a heuristic, deliberately reported as a caveat rather than used to
+  /// suppress the prediction.
+  bool get probablyOutsideVocabulary =>
+      !isDecisive && topTwoMargin < indecisiveMargin;
+
+  /// A short, honest description of how much weight the top-1 label carries.
+  ConfidenceVerdict get verdict {
+    if (isDecisive) return ConfidenceVerdict.decisive;
+    if (probablyOutsideVocabulary) return ConfidenceVerdict.inconclusive;
+    return ConfidenceVerdict.weak;
+  }
+}
+
+/// How much the top-1 label should be trusted. See
+/// [PredictionResult.verdict].
+enum ConfidenceVerdict {
+  /// Top-1 clears 0.50. Treat it as the model's answer.
+  decisive,
+
+  /// Top-1 is low but clearly ahead of the runner-up: a plausible answer on a
+  /// hard or ambiguous image.
+  weak,
+
+  /// Top-1 is low *and* the field is crowded. Most often this means the subject
+  /// is not one of the model's classes at all.
+  inconclusive;
+
+  String get headline => switch (this) {
+        ConfidenceVerdict.decisive => 'Confident',
+        ConfidenceVerdict.weak => 'Low confidence',
+        ConfidenceVerdict.inconclusive => 'Inconclusive',
+      };
+
+  /// Plain-language explanation, safe to show a user.
+  String get explanation => switch (this) {
+        ConfidenceVerdict.decisive =>
+          'The model concentrated its probability on one class.',
+        ConfidenceVerdict.weak =>
+          'Below 50%, but clearly ahead of the runner-up. Typical for an '
+              'ambiguous photo, or one where the subject is partly obscured.',
+        ConfidenceVerdict.inconclusive =>
+          'Low score and a crowded field. This model can only choose among '
+              '1,001 ImageNet classes — which include no person, building, '
+              'road or food class — so a subject outside that list still gets '
+              'a label, just an unconvincing one.',
+      };
 }

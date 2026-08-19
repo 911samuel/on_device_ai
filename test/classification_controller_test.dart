@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:on_device_ai/application/classification_controller.dart';
+import 'package:on_device_ai/domain/resize_strategy.dart';
 import 'package:on_device_ai/data/backend_registry.dart';
 import 'package:on_device_ai/data/model_catalog.dart';
 import 'package:on_device_ai/domain/input_image.dart';
@@ -215,5 +216,58 @@ void main() {
     await Future<void>.delayed(Duration.zero);
 
     expect(model.disposeCalls, 1);
+  });
+
+  group('framing strategy', () {
+    test('defaults to stretch, which is what the reference fixture uses',
+        () async {
+      final model = FakeOnDeviceModel(spec: ModelCatalog.mobileNetV2Float32);
+      final controller = controllerWith(model);
+      await controller.start();
+
+      expect(controller.resizeStrategy, ResizeStrategy.stretch);
+      await controller.classify();
+      expect(model.lastResize, ResizeStrategy.stretch);
+      controller.dispose();
+    });
+
+    test('the chosen strategy reaches predict()', () async {
+      final model = FakeOnDeviceModel(spec: ModelCatalog.mobileNetV2Float32);
+      final controller = controllerWith(model);
+      await controller.start();
+
+      controller.setResizeStrategy(ResizeStrategy.centreCrop);
+      expect(controller.resizeStrategy, ResizeStrategy.centreCrop);
+
+      await controller.classify();
+      expect(model.lastResize, ResizeStrategy.centreCrop);
+      controller.dispose();
+    });
+
+    test('changing it clears the stale result so the two are never mismatched',
+        () async {
+      final model = FakeOnDeviceModel(spec: ModelCatalog.mobileNetV2Float32);
+      final controller = controllerWith(model);
+      await controller.start();
+      await controller.classify();
+      expect(controller.result, isNotNull);
+
+      controller.setResizeStrategy(ResizeStrategy.centreCrop);
+      expect(controller.result, isNull,
+          reason: 'a prediction from the old setting must not be shown');
+      controller.dispose();
+    });
+
+    test('re-selecting the current strategy is a no-op', () async {
+      final model = FakeOnDeviceModel(spec: ModelCatalog.mobileNetV2Float32);
+      final controller = controllerWith(model);
+      await controller.start();
+      await controller.classify();
+
+      controller.setResizeStrategy(ResizeStrategy.stretch);
+      expect(controller.result, isNotNull,
+          reason: 'no change means nothing to invalidate');
+      controller.dispose();
+    });
   });
 }

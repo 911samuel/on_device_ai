@@ -1,12 +1,14 @@
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as img;
 import 'package:on_device_ai/data/image_preprocessor.dart';
 import 'package:on_device_ai/data/model_catalog.dart';
 import 'package:on_device_ai/data/tensor_data.dart';
 import 'package:on_device_ai/domain/input_image.dart';
 import 'package:on_device_ai/domain/ml_exceptions.dart';
 import 'package:on_device_ai/domain/model_spec.dart';
+import 'package:on_device_ai/domain/resize_strategy.dart';
 
 import 'support/fixture.dart';
 
@@ -151,6 +153,126 @@ void main() {
           preprocessor.prepare(calibrationImage(), ModelCatalog.mobileNetV2Float32);
       expect(prepared.sourceWidth, 224);
       expect(prepared.distortedAspectRatio, isFalse);
+    });
+  });
+
+  group('resize strategy: stretch vs centre-crop', () {
+    // A 3:1 wide image in vertical bands: red | green | blue. Stretch keeps all
+    // three; the ImageNet centre-crop recipe keeps essentially only the middle.
+    Uint8List bandedWideImage() {
+      final image = img.Image(width: 672, height: 224);
+      for (var y = 0; y < 224; y++) {
+        for (var x = 0; x < 672; x++) {
+          if (x < 224) {
+            image.setPixelRgb(x, y, 255, 0, 0);
+          } else if (x < 448) {
+            image.setPixelRgb(x, y, 0, 255, 0);
+          } else {
+            image.setPixelRgb(x, y, 0, 0, 255);
+          }
+        }
+      }
+      return img.encodePng(image);
+    }
+
+    /// Mean of one channel across the whole 224x224 tensor, back in 0..255.
+    double channelMean(Float32TensorData tensor, int channel) {
+      var sum = 0.0;
+      for (var i = channel; i < tensor.values.length; i += 3) {
+        sum += (tensor.values[i] + 1.0) * 127.5;
+      }
+      return sum / (224 * 224);
+    }
+
+    test('stretch keeps all three bands and flags the distortion', () {
+      final prepared = preprocessor.prepare(
+        InputImage(bytes: bandedWideImage(), source: 'bands'),
+        ModelCatalog.mobileNetV2Float32,
+        strategy: ResizeStrategy.stretch,
+      );
+
+      expect(prepared.strategy, ResizeStrategy.stretch);
+      expect(prepared.distortedAspectRatio, isTrue,
+          reason: '3:1 squashed to 1:1 is geometric distortion');
+      expect(prepared.croppedAwayContent, isFalse);
+      expect(prepared.resizedWidth, 224);
+      expect(prepared.resizedHeight, 224);
+
+      final tensor = prepared.tensor as Float32TensorData;
+      // Each band survives as roughly a third of the frame.
+      expect(channelMean(tensor, 0), closeTo(85, 12), reason: 'red third');
+      expect(channelMean(tensor, 1), closeTo(85, 12), reason: 'green third');
+      expect(channelMean(tensor, 2), closeTo(85, 12), reason: 'blue third');
+    });
+
+    test('centre-crop keeps the middle band and reports lost content', () {
+      final prepared = preprocessor.prepare(
+        InputImage(bytes: bandedWideImage(), source: 'bands'),
+        ModelCatalog.mobileNetV2Float32,
+        strategy: ResizeStrategy.centreCrop,
+      );
+
+      expect(prepared.strategy, ResizeStrategy.centreCrop);
+      expect(prepared.distortedAspectRatio, isFalse,
+          reason: 'cropping preserves shape; it discards edges instead');
+      expect(prepared.croppedAwayContent, isTrue);
+      expect(prepared.resizedWidth, 224);
+      expect(prepared.resizedHeight, 224);
+
+      final tensor = prepared.tensor as Float32TensorData;
+      // The crop lands inside the green band, so green dominates.
+      expect(channelMean(tensor, 1), greaterThan(200), reason: 'green kept');
+      expect(channelMean(tensor, 0), lessThan(60), reason: 'red cropped away');
+      expect(channelMean(tensor, 2), lessThan(60), reason: 'blue cropped away');
+    });
+
+    test('the two strategies really do produce different tensors', () {
+      final bytes = bandedWideImage();
+      final a = preprocessor.prepare(
+        InputImage(bytes: bytes, source: 'bands'),
+        ModelCatalog.mobileNetV2Float32,
+        strategy: ResizeStrategy.stretch,
+      ).tensor as Float32TensorData;
+      final b = preprocessor.prepare(
+        InputImage(bytes: bytes, source: 'bands'),
+        ModelCatalog.mobileNetV2Float32,
+        strategy: ResizeStrategy.centreCrop,
+      ).tensor as Float32TensorData;
+
+      expect(a.values.length, b.values.length);
+      var differing = 0;
+      for (var i = 0; i < a.values.length; i++) {
+        if ((a.values[i] - b.values[i]).abs() > 0.1) differing++;
+      }
+      expect(differing, greaterThan(a.values.length ~/ 3));
+    });
+
+    test('stretch remains the default, so reference parity is unchanged', () {
+      final explicit = preprocessor.prepare(
+        calibrationImage(),
+        ModelCatalog.mobileNetV2Float32,
+        strategy: ResizeStrategy.stretch,
+      );
+      final byDefault = preprocessor.prepare(
+        calibrationImage(),
+        ModelCatalog.mobileNetV2Float32,
+      );
+      expect(byDefault.strategy, ResizeStrategy.stretch);
+      expect(
+        (byDefault.tensor as Float32TensorData).values,
+        (explicit.tensor as Float32TensorData).values,
+      );
+    });
+
+    test('a square source is unaffected by the choice', () {
+      final cropped = preprocessor.prepare(
+        calibrationImage(),
+        ModelCatalog.mobileNetV2Float32,
+        strategy: ResizeStrategy.centreCrop,
+      );
+      expect(cropped.croppedAwayContent, isFalse,
+          reason: 'nothing to crop from an already-square image');
+      expect(cropped.distortedAspectRatio, isFalse);
     });
   });
 

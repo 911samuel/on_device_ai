@@ -1,32 +1,40 @@
-# Offline verification
+# Proving it really runs offline
 
-"It's on-device because LiteRT is on-device" is an assertion, not evidence. This file records what was
-actually executed, what was observed, and — importantly — which checks are weak and why.
+New to this? Read [`GLOSSARY.md`](GLOSSARY.md) first.
+
+"It's on-device because we used an on-device library" is an assertion, not evidence. Anyone can claim their app
+works offline. This page records what we actually executed, what we observed, and — importantly — which checks
+are weak and why.
+
+**Why this page exists at all.** The whole promise of on-device AI is that your data never leaves the phone. That
+promise is worth exactly as much as your evidence for it. So we tried to *disprove* it, and failed. That's a
+better foundation than trusting a library's marketing.
 
 Date of run: 2026-08-18. The offline checks below were performed on the **Android emulator** (Pixel 8,
-arm64-v8a), because Android is where the strongest evidence is available — a missing `INTERNET` permission is
-kernel-enforced. Inference itself was additionally validated on a physical iPhone 13 Pro and the iOS
-simulator; see `docs/BENCHMARKS.md`.
+arm64-v8a), because Android is where the strongest evidence is available — a missing internet permission there
+is enforced by the operating system kernel, not by politeness. Inference itself was additionally validated on a
+physical iPhone 13 Pro and the iOS simulator; see [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ## Summary
 
-| # | Check | Platform | Result | Strength |
+| # | Check | Platform | Result | How convincing? |
 |---|---|---|---|---|
-| 1 | Release APK's merged manifest declares no `INTERNET` permission | Android | **PASS** — no `uses-permission` for INTERNET exists | **Strong** — kernel-enforced |
-| 2 | Real inference with the network unreachable | Android | **PASS** — all 15 integration tests passed with `connect: Network is unreachable` | **Strong** |
-| 3 | App's uid owns zero TCP/UDP sockets | Android | **PASS** — 0 sockets for uid 10235, with a positive control | Medium |
-| 4 | Models are inside the app package | Android | **PASS** — both `.tflite` files present in the APK | Strong |
-| 5 | Weights load through `rootBundle`, and no HTTP client is linked | Both | **PASS** — no networking code in the inference path | Medium |
-| 6 | UI-driven inference in a **release** build | Android | **NOT COMPLETED** — emulator System UI was ANR-ing | — |
+| 1 | Release app declares no `INTERNET` permission | Android | **PASS** — no such permission exists in the built app | **Strong** — enforced by the OS kernel |
+| 2 | Real inference with the network physically unreachable | Android | **PASS** — all 15 integration tests passed with `connect: Network is unreachable` | **Strong** |
+| 3 | The app owns zero network connections while running | Android | **PASS** — 0 sockets for uid 10235, with a positive control | Medium |
+| 4 | The models are inside the app package | Android | **PASS** — both `.tflite` files present in the APK | Strong |
+| 5 | Weights load from local assets, no HTTP client is linked | Both | **PASS** — no networking code in the inference path at all | Medium |
+| 6 | Tapping through the UI in a **release** build | Android | **NOT COMPLETED** — the emulator's System UI kept freezing | — |
 
-## 1. The release APK cannot open a socket (strongest check)
+## 1. The release app *cannot* open a network connection (strongest check)
 
-This project deliberately does **not** declare `android.permission.INTERNET` in
-`android/app/src/main/AndroidManifest.xml`. On Android that permission is install-time and enforced by the
-kernel: without it, the process is placed outside the `inet` group and `socket()` fails. It is not a policy
-the app can talk its way around.
+**What a permission is, briefly.** On Android, an app must declare up front which capabilities it wants. Network
+access is one of them (`android.permission.INTERNET`). If an app doesn't declare it at install time, the kernel
+puts the process outside the networking group and connection attempts simply fail. It isn't a policy the app can
+talk its way around, and it isn't something the app can grant itself later.
 
-Verified against the built release artifact, not the source:
+This project deliberately does **not** declare it. Verified against the *built artifact*, not the source code —
+because what ships is what matters:
 
 ```console
 $ aapt2 dump permissions build/app/outputs/flutter-apk/app-release.apk
@@ -35,7 +43,8 @@ permission: com.amalitech.on_device_ai.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
 uses-permission: name='com.amalitech.on_device_ai.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'
 ```
 
-The only entry is the one the Android Gradle plugin generates for dynamic receivers. And after installing:
+The only entry is one the Android build tooling generates automatically for internal message passing. And after
+actually installing it on a device:
 
 ```console
 $ adb shell dumpsys package com.amalitech.on_device_ai | sed -n '/requested permissions/,/install permissions/p'
@@ -44,16 +53,17 @@ $ adb shell dumpsys package com.amalitech.on_device_ai | sed -n '/requested perm
     install permissions:
 ```
 
-No INTERNET requested, none granted.
+No internet permission requested, none granted.
 
-**The caveat, stated up front:** `android/app/src/debug/AndroidManifest.xml` and the profile manifest — both
-generated by Flutter, not by us — *do* add INTERNET, because the Dart VM service needs it during
-development. So this check is only meaningful for release builds — which is why it is stated here, with the
-build mode named, rather than as an unqualified "the app is offline".
+**The caveat, stated up front:** the *debug* and *profile* manifests — generated by Flutter, not by us — **do**
+add the internet permission, because Flutter's development tooling needs it to talk to the running app. So this
+check is only meaningful for release builds, which is why it's stated here with the build mode named, rather
+than as an unqualified "the app is offline".
 
 ## 2. Real inference with the network unreachable
 
-Connectivity was removed at the platform level and the full integration suite re-run:
+The strongest check proves the app *can't* reach the network. This one proves it doesn't *want to*. We removed
+connectivity at the platform level and re-ran the entire test suite:
 
 ```console
 $ adb shell settings put global airplane_mode_on 1
@@ -62,7 +72,7 @@ $ adb shell settings get global airplane_mode_on
 1
 $ adb shell ping -c 1 -W 2 8.8.8.8
 connect: Network is unreachable
-$ adb shell ip route          # no output: no routes at all
+$ adb shell ip route          # no output at all: no network routes exist
 ```
 
 With the device in that state:
@@ -74,15 +84,17 @@ $ flutter test integration_test/on_device_inference_test.dart -d emulator-5554
 00:10 +15: All tests passed!
 ```
 
-All six backends initialised, ran real inference over three images each, and matched the reference —
-with no network available. Connectivity was still unreachable after the run (re-checked), so this was not
-a case of the state lapsing mid-test. Airplane mode was then restored.
+All six backends started up, ran real inference on three images each, and matched the reference answers — with no
+network available. Connectivity was re-checked *after* the run to confirm the state hadn't quietly lapsed
+mid-test. Airplane mode was then restored.
 
-This uses a debug build (integration tests require the Dart VM service over adb, which is a local
-socket/USB channel, not IP networking). Check 1 covers what release builds can do; this check covers
-whether the *inference path itself* needs a network. Neither check alone is sufficient; together they are.
+This one uses a debug build, because integration tests need Flutter's tooling channel (which runs over USB, not
+over the internet). So check 1 covers what release builds are *capable* of, and this check covers whether the
+inference path *needs* a network. Neither is sufficient alone; together they are.
 
-## 3. Socket table audit
+## 3. Connection-table audit
+
+A third angle: ask the operating system directly what network connections this app owns.
 
 ```console
 $ adb shell ps -A -o USER,PID,NAME | grep on_device_ai
@@ -91,18 +103,19 @@ $ adb shell dumpsys package com.amalitech.on_device_ai | grep -oE "uid=[0-9]+" |
 uid=10235
 ```
 
-Sockets owned by uid 10235 across all four tables, while the release build was running with both models
-loaded:
+Connections owned by uid 10235 across all four kernel tables, while the release build was running with both
+models loaded:
 
-| Table | Sockets owned by the app |
+| Table | Connections owned by the app |
 |---|---:|
 | `/proc/net/tcp` | 0 |
 | `/proc/net/tcp6` | 0 |
 | `/proc/net/udp` | 0 |
 | `/proc/net/udp6` | 0 |
 
-**Positive control** — the same query does detect real sockets, so "0" is a finding and not a broken
-command. Dumping the table shows another app (uid 10224) holding an established connection:
+**Why there's a "positive control" here.** Four zeros is only meaningful if the command can detect a non-zero.
+A broken command also returns zeros. So we dumped the same tables unfiltered and confirmed real connections *are*
+visible — belonging to a different app:
 
 ```text
 local=0000000000000000FFFF00001002000A:E20A state=01 uid=10224   <- established, different app
@@ -110,10 +123,11 @@ local=00000000000000000000000000000000:15B3 state=0A uid=2000    <- adbd, listen
 local=1002000A:AB78                          state=09 uid=0
 ```
 
-An earlier attempt at this check silently compared against an empty uid string and reported four
-convenient zeros. That number was meaningless and was discarded rather than published.
+An earlier attempt at this check accidentally compared against an empty user id and returned four very
+convenient zeros. That number was meaningless, so it was thrown away and the check redone properly. Worth
+mentioning because it's the most common way a verification step fools the person running it.
 
-## 4. The weights ship inside the package
+## 4. The weights ship inside the app package
 
 ```console
 $ unzip -l build/app/outputs/flutter-apk/app-release.apk | grep assets/models
@@ -122,34 +136,38 @@ $ unzip -l build/app/outputs/flutter-apk/app-release.apk | grep assets/models
        10484  assets/flutter_assets/assets/models/imagenet_labels_1001.txt
 ```
 
-Byte-for-byte the sizes recorded in `ModelCatalog`, which `initialize()` also checks at runtime — so a
-truncated or substituted asset fails loudly at startup instead of predicting nonsense.
+Byte-for-byte the sizes recorded in `ModelCatalog`, which the app also re-checks at startup — so a truncated or
+substituted model file fails loudly instead of quietly predicting nonsense.
 
-## 5. No networking in the inference path
+## 5. There is no networking code in the inference path
 
-`lib/data/asset_sources.dart` loads weights with `rootBundle.load()`, which reads from the application
-package on disk. There is now **no networking code at all** in `lib/`: no HTTP client, no socket call, and no
-networking package in the dependency graph. Grep-able claim:
+`lib/data/asset_sources.dart` loads the weights with `rootBundle.load()`, which reads from the app package on
+disk. There is now **no networking code at all** anywhere in `lib/`: no HTTP client, no socket call, and no
+networking package in the dependency graph. A claim you can check yourself in one command:
 
 ```console
 $ grep -rn "HttpClient\|Socket\|package:http" lib/ --include="*.dart"
 $ echo $?
-1        # no matches
+1        # exit code 1 = no matches found
 ```
 
 > **Removed since the first revision:** the app briefly shipped an in-app "Run network self-test" button that
-> asked the OS for an outbound socket and explained the result on screen. It was deleted when the UI was
-> simplified to show model facts only — that explanation belongs in this document and the slides, not on the
-> device. The evidence above does not depend on it, and check 1 is a stronger, kernel-enforced version of the
-> same claim. Its removal is why the grep above now returns nothing at all.
+> asked the OS for an outbound connection and explained the result on screen. It was deleted when the UI was
+> simplified to show model facts only — that explanation belongs in this document, not on the device. The
+> evidence above doesn't depend on it, and check 1 is a stronger, kernel-enforced version of the same claim.
+> Its removal is why the grep above now returns nothing at all.
 
-## 6. What was not verified
+## 6. What was *not* verified
 
-* **UI-driven inference in an Android release build.** The release APK installs, launches, initialises
-  LiteRT (the UI displayed native version `2.22.0-dev0+selfbuilt` and the full tensor contract), and its
-  process holds no sockets — but the emulator's System UI entered a repeated ANR state and swallowed the
-  taps needed to press *Run inference*. The equivalent code path is covered by check 2 in a debug build.
-  On a physical device this would be a 10-second manual check.
-* **iOS release/physical device.** Out of scope for this PoC by choice; see the honesty notes in the README.
-* **A packet-level capture.** `tcpdump` on the emulator interface during inference would be stronger than
-  the socket-table snapshot in check 3. Not run.
+Stating this plainly is part of the point of the document.
+
+* **Tapping through the UI in an Android release build.** The release app installs, launches, initialises LiteRT
+  (the UI displayed native version `2.22.0-dev0+selfbuilt` and the full tensor contract), and its process holds
+  no network connections — but the emulator's System UI entered a repeated freeze state and swallowed the taps
+  needed to press *Run inference*. The same code path is covered by check 2 in a debug build. On a physical
+  device this would be a ten-second manual check.
+* **iOS offline checks of equivalent strength.** iOS has no install-time network permission, so there is no iOS
+  equivalent of check 1. Local execution on iOS rests on checks 4 and 5 plus the architecture: the model bytes
+  come from the app bundle and the runtime is a linked native library.
+* **A packet-level capture.** Running `tcpdump` on the emulator's network interface during inference would be
+  stronger than the connection-table snapshot in check 3. Not run.

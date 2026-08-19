@@ -1,6 +1,7 @@
 import 'input_image.dart';
 import 'model_spec.dart';
 import 'prediction.dart';
+import 'resize_strategy.dart';
 
 /// The application's entire view of "a model that runs locally".
 ///
@@ -34,9 +35,17 @@ abstract interface class OnDeviceModel {
 
   /// Runs the full pipeline for [image] and returns the top [topK] classes.
   ///
+  /// [resize] selects how a non-square source is fitted to the model's square
+  /// input. It lives here rather than in the constructor because it is a
+  /// per-prediction choice the user can flip to compare results.
+  ///
   /// Throws [ImageDecodeException] for unusable input, [InferenceException] if
   /// the runtime fails, [ModelLifecycleException] if not initialised.
-  Future<PredictionResult> predict(InputImage image, {int topK = 5});
+  Future<PredictionResult> predict(
+    InputImage image, {
+    int topK = 5,
+    ResizeStrategy resize = ResizeStrategy.stretch,
+  });
 
   /// Releases native memory. Safe to call more than once, and safe to call
   /// without a preceding [initialize].

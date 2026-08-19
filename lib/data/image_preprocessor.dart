@@ -5,6 +5,7 @@ import 'package:image/image.dart' as img;
 import '../domain/input_image.dart';
 import '../domain/ml_exceptions.dart';
 import '../domain/model_spec.dart';
+import '../domain/resize_strategy.dart';
 import 'tensor_data.dart';
 
 /// Outcome of preprocessing, including what the source looked like.
@@ -16,6 +17,7 @@ class PreprocessedImage {
     required this.resizedWidth,
     required this.resizedHeight,
     required this.interpolation,
+    this.strategy = ResizeStrategy.stretch,
   });
 
   final TensorData tensor;
@@ -27,10 +29,20 @@ class PreprocessedImage {
   /// Which resampling filter was used, so it can be reported and tested.
   final String interpolation;
 
-  /// True when the resize changed the aspect ratio (see the note on
-  /// [ImagePreprocessor] about stretch vs centre-crop).
+  /// How the source was fitted to the square input.
+  final ResizeStrategy strategy;
+
+  /// True when the resize changed the aspect ratio, i.e. the subject is
+  /// geometrically distorted. Only [ResizeStrategy.stretch] can do this;
+  /// [ResizeStrategy.centreCrop] preserves shape and discards edges instead.
   bool get distortedAspectRatio =>
+      strategy == ResizeStrategy.stretch &&
       sourceWidth * resizedHeight != sourceHeight * resizedWidth;
+
+  /// True when part of the frame was discarded to reach a square, i.e. the
+  /// subject is undistorted but may be partly out of view.
+  bool get croppedAwayContent =>
+      strategy == ResizeStrategy.centreCrop && sourceWidth != sourceHeight;
 }
 
 /// Turns encoded image bytes into the exact tensor a [ModelSpec] declares.
@@ -43,13 +55,14 @@ class PreprocessedImage {
 /// Pipeline: **decode → force 8-bit RGB → resize to 224×224 → normalise → flat
 /// buffer**.
 ///
-/// Resize policy is a plain stretch to the model's square input, with no
-/// letterbox and no centre crop. That is a deliberate, documented choice: it is
-/// the simplest thing to explain and it keeps the whole frame visible. The cost
-/// is aspect-ratio distortion on non-square inputs, which measurably lowers
-/// confidence on elongated subjects; the standard ImageNet evaluation recipe
-/// instead centre-crops to 87.5% before resizing.
-/// [PreprocessedImage.distortedAspectRatio] surfaces when this applies.
+/// Resize policy is selectable, because it is a real accuracy decision and
+/// neither option wins everywhere — see [ResizeStrategy] for the measurements.
+/// [ResizeStrategy.stretch] is the default: it keeps the whole frame visible and
+/// it is what `tool/reference_predict.py` does, so the committed fixture and the
+/// bit-level parity tests describe that path.
+/// [ResizeStrategy.centreCrop] implements the standard ImageNet evaluation
+/// recipe instead. [PreprocessedImage.distortedAspectRatio] and
+/// [PreprocessedImage.croppedAwayContent] report which cost was paid.
 ///
 /// The *filter* is chosen by scale factor, which is a measured decision rather
 /// than a default. Downsampling a 512x600 photo to 224x224 throws away ~84% of
@@ -71,7 +84,11 @@ class PreprocessedImage {
 class ImagePreprocessor {
   const ImagePreprocessor();
 
-  PreprocessedImage prepare(InputImage image, ModelSpec spec) {
+  PreprocessedImage prepare(
+    InputImage image,
+    ModelSpec spec, {
+    ResizeStrategy strategy = ResizeStrategy.stretch,
+  }) {
     if (image.bytes.isEmpty) {
       throw const ImageDecodeException('Image data is empty (0 bytes).');
     }
@@ -101,20 +118,56 @@ class ImagePreprocessor {
 
     final alreadyExact =
         rgb8.width == spec.inputWidth && rgb8.height == spec.inputHeight;
-    final interpolation = selectInterpolation(
-      sourceWidth: rgb8.width,
-      sourceHeight: rgb8.height,
-      targetWidth: spec.inputWidth,
-      targetHeight: spec.inputHeight,
-    );
-    final resized = alreadyExact
-        ? rgb8
-        : img.copyResize(
-            rgb8,
-            width: spec.inputWidth,
-            height: spec.inputHeight,
-            interpolation: interpolation,
-          );
+
+    // Both strategies land on exactly spec.inputWidth x spec.inputHeight; they
+    // differ in what they sacrifice to get there. The *filter* choice is shared,
+    // and is driven by how much the image is actually shrinking.
+    final img.Image resized;
+    final img.Interpolation interpolation;
+    if (alreadyExact) {
+      resized = rgb8;
+      interpolation = img.Interpolation.linear; // unused; reported as 'none'
+    } else if (strategy == ResizeStrategy.centreCrop) {
+      // ImageNet recipe: short side to input/0.875 (256 for a 224 model),
+      // preserving aspect ratio, then take the centre square.
+      final shortSideTarget =
+          (spec.inputWidth / ResizeStrategy.centreCropRatio).round();
+      final scale = shortSideTarget / (rgb8.width < rgb8.height ? rgb8.width : rgb8.height);
+      final scaledWidth = (rgb8.width * scale).round();
+      final scaledHeight = (rgb8.height * scale).round();
+      interpolation = selectInterpolation(
+        sourceWidth: rgb8.width,
+        sourceHeight: rgb8.height,
+        targetWidth: scaledWidth,
+        targetHeight: scaledHeight,
+      );
+      final scaled = img.copyResize(
+        rgb8,
+        width: scaledWidth,
+        height: scaledHeight,
+        interpolation: interpolation,
+      );
+      resized = img.copyCrop(
+        scaled,
+        x: ((scaledWidth - spec.inputWidth) / 2).round(),
+        y: ((scaledHeight - spec.inputHeight) / 2).round(),
+        width: spec.inputWidth,
+        height: spec.inputHeight,
+      );
+    } else {
+      interpolation = selectInterpolation(
+        sourceWidth: rgb8.width,
+        sourceHeight: rgb8.height,
+        targetWidth: spec.inputWidth,
+        targetHeight: spec.inputHeight,
+      );
+      resized = img.copyResize(
+        rgb8,
+        width: spec.inputWidth,
+        height: spec.inputHeight,
+        interpolation: interpolation,
+      );
+    }
 
     // Explicit channel order. Getting RGB vs BGR wrong does not crash and does
     // not look obviously broken — it just quietly degrades accuracy — so it is
@@ -135,6 +188,7 @@ class ImagePreprocessor {
       resizedWidth: resized.width,
       resizedHeight: resized.height,
       interpolation: alreadyExact ? 'none' : interpolation.name,
+      strategy: strategy,
     );
   }
 

@@ -12,6 +12,7 @@ import '../domain/ml_exceptions.dart';
 import '../domain/model_spec.dart';
 import '../domain/on_device_model.dart';
 import '../domain/prediction.dart';
+import '../domain/resize_strategy.dart';
 import 'asset_sources.dart';
 import 'classification_postprocessor.dart';
 import 'image_preprocessor.dart';
@@ -189,7 +190,11 @@ class LiteRtCompiledModelClassifier implements OnDeviceModel {
   }
 
   @override
-  Future<PredictionResult> predict(InputImage image, {int topK = 5}) async {
+  Future<PredictionResult> predict(
+    InputImage image, {
+    int topK = 5,
+    ResizeStrategy resize = ResizeStrategy.stretch,
+  }) async {
     final model = _model;
     final labels = _labels;
     if (model == null || labels == null || _disposed) {
@@ -199,7 +204,7 @@ class LiteRtCompiledModelClassifier implements OnDeviceModel {
     }
 
     final preprocessWatch = Stopwatch()..start();
-    final prepared = preprocessor.prepare(image, spec);
+    final prepared = preprocessor.prepare(image, spec, strategy: resize);
     preprocessWatch.stop();
 
     final tensor = prepared.tensor;

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../application/classification_controller.dart';
 import '../domain/backend_descriptor.dart';
+import '../domain/resize_strategy.dart';
 import 'widgets/benchmark_card.dart';
 import 'widgets/prediction_card.dart';
 import 'widgets/runtime_card.dart';
@@ -45,6 +46,7 @@ class ClassificationPage extends StatelessWidget {
             children: [
               _ImageSection(controller: controller),
               _BackendSelector(controller: controller),
+              _FramingSelector(controller: controller),
               _Actions(controller: controller),
               if (error != null)
                 _ErrorCard(message: error, detail: controller.errorDetail),
@@ -94,6 +96,44 @@ class _BackendSelector extends StatelessWidget {
             : (value) {
                 if (value != null) controller.selectBackend(value);
               },
+      ),
+    );
+  }
+}
+
+/// Lets the user flip how a non-square photo is fitted to the square input.
+///
+/// Present because the two options genuinely trade off per photo — cropping
+/// nearly doubles confidence on a centred subject and loses it entirely when it
+/// crops the identifying detail away — and a PoC about honest measurement should
+/// let you see that rather than take its word for it.
+class _FramingSelector extends StatelessWidget {
+  const _FramingSelector({required this.controller});
+
+  final ClassificationController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: SegmentedButton<ResizeStrategy>(
+        segments: const [
+          ButtonSegment(
+            value: ResizeStrategy.stretch,
+            label: Text('Stretch'),
+            icon: Icon(Icons.aspect_ratio, size: 18),
+          ),
+          ButtonSegment(
+            value: ResizeStrategy.centreCrop,
+            label: Text('Centre-crop'),
+            icon: Icon(Icons.crop, size: 18),
+          ),
+        ],
+        selected: {controller.resizeStrategy},
+        showSelectedIcon: false,
+        onSelectionChanged: controller.isBusy
+            ? null
+            : (selection) => controller.setResizeStrategy(selection.first),
       ),
     );
   }

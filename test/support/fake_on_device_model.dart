@@ -1,4 +1,5 @@
 import 'package:on_device_ai/domain/input_image.dart';
+import 'package:on_device_ai/domain/resize_strategy.dart';
 import 'package:on_device_ai/domain/ml_exceptions.dart';
 import 'package:on_device_ai/domain/model_spec.dart';
 import 'package:on_device_ai/domain/on_device_model.dart';
@@ -56,6 +57,10 @@ class FakeOnDeviceModel implements OnDeviceModel {
         accelerators: AcceleratorReport.unknown(),
       );
 
+  /// The strategy the last [predict] call received, so controller wiring can be
+  /// asserted without a real model.
+  ResizeStrategy? lastResize;
+
   @override
   Future<void> initialize() async {
     initializeCalls++;
@@ -65,8 +70,13 @@ class FakeOnDeviceModel implements OnDeviceModel {
   }
 
   @override
-  Future<PredictionResult> predict(InputImage image, {int topK = 5}) async {
+  Future<PredictionResult> predict(
+    InputImage image, {
+    int topK = 5,
+    ResizeStrategy resize = ResizeStrategy.stretch,
+  }) async {
     predictCalls++;
+    lastResize = resize;
     final error = predictError;
     if (error != null) throw error;
     if (!_initialized) {

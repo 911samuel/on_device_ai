@@ -7,6 +7,7 @@ import '../domain/ml_exceptions.dart';
 import '../domain/model_spec.dart';
 import '../domain/on_device_model.dart';
 import '../domain/prediction.dart';
+import '../domain/resize_strategy.dart';
 import 'asset_sources.dart';
 import 'classification_postprocessor.dart';
 import 'image_preprocessor.dart';
@@ -185,7 +186,11 @@ class LiteRtInterpreterClassifier implements OnDeviceModel {
   }
 
   @override
-  Future<PredictionResult> predict(InputImage image, {int topK = 5}) async {
+  Future<PredictionResult> predict(
+    InputImage image, {
+    int topK = 5,
+    ResizeStrategy resize = ResizeStrategy.stretch,
+  }) async {
     final interpreter = _interpreter;
     final labels = _labels;
     if (interpreter == null || labels == null || _disposed) {
@@ -195,7 +200,7 @@ class LiteRtInterpreterClassifier implements OnDeviceModel {
     }
 
     final preprocessWatch = Stopwatch()..start();
-    final prepared = preprocessor.prepare(image, spec);
+    final prepared = preprocessor.prepare(image, spec, strategy: resize);
     preprocessWatch.stop();
 
     // Flat typed buffers in and out: the binding memcpys them straight into the
